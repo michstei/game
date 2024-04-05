@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use winit::event::{ElementState, Event, WindowEvent};
+use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::WindowBuilder;
-use crate::keyboard::KeyboardState;
+use crate::keyboard::{ENTER, KeyboardState};
 
 mod keyboard;
 
@@ -16,33 +16,23 @@ fn main() {
 
     let window = window_builder.build(&event_loop).expect("could not create window");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut modifiers: ModifiersState = ModifiersState::default();
     let mut keyboard_state = KeyboardState { keys: HashMap::new() };
+
     event_loop.run(move |event, elwt| match event {
         Event::WindowEvent {
             event,
             ..
         } => match event {
-            WindowEvent::ModifiersChanged(new) => {
-                modifiers = new.state();
-            }
             WindowEvent::KeyboardInput { event, .. } => {
-                keyboard_state.update_key(event.key_without_modifiers(), event.state);
-                println!("{:?}", keyboard_state);
-                if event.state == ElementState::Pressed && !event.repeat {
-                    match event.key_without_modifiers().as_ref() {
-                        Key::Character("1") => {
-                            if modifiers.shift_key() {
-                                println!("Shift + 1 | logical_key: {:?}", event.logical_key);
-                            } else {
-                                println!("1");
-                            }
-                        }
+                if !event.repeat {
+                    match event.key_without_modifiers() {
                         Key::Named(NamedKey::Escape) => {
                             println!("Escape -> exiting");
                             elwt.exit();
                         }
-                        _ => (),
+                        _ => {
+                            keyboard_state.update_key(event.key_without_modifiers(), event.state);
+                        }
                     }
                 }
             }
