@@ -1,4 +1,6 @@
-use wgpu::Surface;
+use std::collections::HashMap;
+
+use wgpu::include_wgsl;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop},
@@ -97,11 +99,13 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
+    render_pipeline_2: wgpu::RenderPipeline,
     // The window must be declared after the surface so
     // it gets dropped after it as the surface contains
     // unsafe references to the window's resources.
     window: Window,
     cursor_pos: PhysicalPosition<f64>,
+    keyboard_state: HashMap<VirtualKeyCode, bool>,
 }
 
 impl State {
@@ -157,6 +161,7 @@ impl State {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
+        let shader_2 = device.create_shader_module(include_wgsl!("shader_2.wgsl"));
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render pipeline layout"),
             bind_group_layouts: &[],
@@ -170,9 +175,42 @@ impl State {
                 entry_point: "vs_main",
                 buffers: &[],
             },
-
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+        let render_pipeline_2 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Render pipeline 2"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_2,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_2,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -205,7 +243,9 @@ impl State {
             config,
             size,
             render_pipeline,
+            render_pipeline_2,
             cursor_pos: PhysicalPosition::default(),
+            keyboard_state: HashMap::new(),
         }
     }
 
@@ -224,9 +264,18 @@ impl State {
 
     fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
-            WindowEvent::CursorMoved { position, device_id, .. } => {
+            WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = PhysicalPosition::new(position.x, position.y);
                 true
+            }
+            WindowEvent::KeyboardInput { input, .. } => {
+                match input.virtual_keycode {
+                    None => { true }
+                    Some(key) => {
+                        self.keyboard_state.insert(key, if ElementState::Pressed == input.state { true } else { false });
+                        true
+                    }
+                }
             }
             _ => { false }
         }
@@ -264,12 +313,20 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_pipeline(if self.is_key_pressed(VirtualKeyCode::Space) { &self.render_pipeline_2 } else { &self.render_pipeline });
             render_pass.draw(0..3, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
+    }
+
+    fn is_key_pressed(&self, key: VirtualKeyCode) -> bool {
+        let val = self.keyboard_state.get(&key);
+        match val {
+            None => { false }
+            Some(value) => { *value }
+        }
     }
 }
 
