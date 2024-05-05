@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use cgmath::InnerSpace;
 use image::GenericImageView;
 use wgpu::include_wgsl;
 use wgpu::util::DeviceExt;
@@ -96,6 +97,102 @@ pub async fn run() {
     });
 }
 
+struct CameraController {
+    speed: f32,
+    is_forward_pressed: bool,
+    is_backward_pressed: bool,
+    is_left_pressed: bool,
+    is_right_pressed: bool,
+}
+
+impl CameraController {
+    fn new(speed: f32) -> Self {
+        Self {
+            speed,
+            is_forward_pressed: false,
+            is_backward_pressed: false,
+            is_left_pressed: false,
+            is_right_pressed: false,
+        }
+    }
+    fn process_keyboard_input(&mut self, keyboard_state: &KeyboardState) {
+        self.is_forward_pressed = keyboard_state.is_key_pressed(VirtualKeyCode::W) || keyboard_state.is_key_pressed(VirtualKeyCode::Up);
+        self.is_backward_pressed = keyboard_state.is_key_pressed(VirtualKeyCode::S) || keyboard_state.is_key_pressed(VirtualKeyCode::Down);
+        self.is_left_pressed = keyboard_state.is_key_pressed(VirtualKeyCode::A) || keyboard_state.is_key_pressed(VirtualKeyCode::Left);
+        self.is_right_pressed = keyboard_state.is_key_pressed(VirtualKeyCode::D) || keyboard_state.is_key_pressed(VirtualKeyCode::Right);
+    }
+    fn update_camera(&self, camera: &mut Camera) {
+        use cgmath::InnerSpace;
+        let forward = camera.target - camera.eye;
+        let forward_norm = forward.normalize();
+        let forward_mag = forward.magnitude();
+
+        if self.is_forward_pressed && forward_mag > self.speed {
+            camera.eye += forward_norm * self.speed;
+        }
+        if self.is_backward_pressed {
+            camera.eye -= forward_norm * self.speed;
+        }
+        let right = forward_norm.cross(camera.up);
+        let forward = camera.target - camera.eye;
+        let forward_mag = forward.magnitude();
+        if self.is_right_pressed {
+            camera.eye = camera.target - (forward + right * self.speed).normalize() * forward_mag;
+        }
+        if self.is_left_pressed {
+            camera.eye = camera.target - (forward - right * self.speed).normalize() * forward_mag;
+        }
+    }
+}
+
+#[rustfmt::skip]
+pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, 0.5,
+    0.0, 0.0, 0.0, 1.0,
+);
+
+struct Camera {
+    eye: cgmath::Point3<f32>,
+    target: cgmath::Point3<f32>,
+    up: cgmath::Vector3<f32>,
+    aspect: f32,
+    fovy: f32,
+    znear: f32,
+    zfar: f32,
+}
+
+impl Camera {
+    fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+        let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
+        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
+        return OPENGL_TO_WGPU_MATRIX * proj * view;
+    }
+}
+
+struct KeyboardState {
+    state: HashMap<VirtualKeyCode, bool>,
+}
+
+impl KeyboardState {
+    pub fn new() -> Self {
+        Self {
+            state: HashMap::new(),
+        }
+    }
+    pub fn insert(&mut self, key: VirtualKeyCode, pressed: bool) {
+        self.state.insert(key, pressed);
+    }
+    pub fn is_key_pressed(&self, key: VirtualKeyCode) -> bool {
+        let val = self.state.get(&key);
+        match val {
+            None => { false }
+            Some(value) => { *value }
+        }
+    }
+}
+
 struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -109,13 +206,20 @@ struct State {
     num_indices: u32,
     diffuse_bind_group: wgpu::BindGroup,
     diffuse_texture: texture::Texture,
-    render_pipeline_2: wgpu::RenderPipeline,
+    camera: Camera,
+    camera_controller: CameraController,
+    camera_uniform: CameraUniform,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
     // The window must be declared after the surface so
     // it gets dropped after it as the surface contains
     // unsafe references to the window's resources.
     window: Window,
     cursor_pos: PhysicalPosition<f64>,
-    keyboard_state: HashMap<VirtualKeyCode, bool>,
+    keyboard_state: KeyboardState,
+
+    diffuse_bind_group_smile: wgpu::BindGroup,
+    diffuse_texture_smile: texture::Texture,
 }
 
 impl State {
@@ -168,7 +272,9 @@ impl State {
         };
         surface.configure(&device, &config);
         let diffuse_bytes = include_bytes!("..\\assets\\happy-tree.png");
-        let diffuse_texture = texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "..\\assets\\happy-tree.png").expect("Failed to create texture");
+        let diffuse_bytes_smile = include_bytes!("..\\assets\\smile.jpg");
+        let diffuse_texture = texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "tree").expect("Failed to create texture");
+        let diffuse_texture_smile = texture::Texture::from_bytes(&device, &queue, diffuse_bytes_smile, "smile").expect("Failed to create texture");
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -207,15 +313,78 @@ impl State {
                 label: Some("diffuse bind group"),
             }
         );
+        let diffuse_bind_group_smile = device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture_smile.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&diffuse_texture_smile.sampler),
+                    },
+                ],
+                label: Some("diffuse bind group smile"),
+            }
+        );
+
+        let camera = Camera {
+            eye: (0.0, 1.0, 2.0).into(),
+            target: (0.0, 0.0, 0.0).into(),
+            up: cgmath::Vector3::unit_y(),
+            aspect: config.width as f32 / config.height as f32,
+            fovy: 45.0,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+        let camera_controller = CameraController::new(0.2);
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update_view_proj(&camera);
+        let camera_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Camera buffer"),
+                contents: bytemuck::cast_slice(&[camera_uniform]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }
+        );
+
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            ],
+            label: Some("Camera bind group layout"),
+        });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                }
+            ],
+            label: Some("camera bind group"),
+        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
-        let shader_2 = device.create_shader_module(include_wgsl!("shader_2.wgsl"));
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render pipeline layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
+            bind_group_layouts: &[
+                &texture_bind_group_layout,
+                &camera_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -229,40 +398,6 @@ impl State {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
-        let render_pipeline_2 = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render pipeline 2"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader_2,
-                entry_point: "vs_main",
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_2,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -317,9 +452,15 @@ impl State {
             num_indices,
             diffuse_bind_group,
             diffuse_texture,
-            render_pipeline_2,
+            camera,
+            camera_controller,
+            camera_uniform,
+            camera_buffer,
+            camera_bind_group,
             cursor_pos: PhysicalPosition::default(),
-            keyboard_state: HashMap::new(),
+            keyboard_state: KeyboardState::new(),
+            diffuse_bind_group_smile,
+            diffuse_texture_smile,
         }
     }
 
@@ -347,6 +488,7 @@ impl State {
                     None => { true }
                     Some(key) => {
                         self.keyboard_state.insert(key, if ElementState::Pressed == input.state { true } else { false });
+                        self.camera_controller.process_keyboard_input(&self.keyboard_state);
                         true
                     }
                 }
@@ -355,7 +497,11 @@ impl State {
         }
     }
 
-    fn update(&mut self) {}
+    fn update(&mut self) {
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera_uniform.update_view_proj(&self.camera);
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+    }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let r = 0.1;//(self.cursor_pos.x as i64 % 255) as f64 / 255f64;
@@ -387,28 +533,18 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            if self.is_key_pressed(VirtualKeyCode::Space) {
-                render_pass.set_pipeline(&self.render_pipeline_2);
-                render_pass.draw(0..self.num_vertices, 0..1);
-            } else {
-                render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
-            }
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, if self.keyboard_state.is_key_pressed(VirtualKeyCode::Space)
+            { &self.diffuse_bind_group_smile } else { &self.diffuse_bind_group }, &[]);
+            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
-    }
-
-    fn is_key_pressed(&self, key: VirtualKeyCode) -> bool {
-        let val = self.keyboard_state.get(&key);
-        match val {
-            None => { false }
-            Some(value) => { *value }
-        }
     }
 }
 
@@ -436,6 +572,25 @@ impl Vertex {
                     format: wgpu::VertexFormat::Float32x2,
                 }],
         }
+    }
+}
+
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+}
+
+impl CameraUniform {
+    fn new() -> Self {
+        use cgmath::SquareMatrix;
+        Self {
+            view_proj: cgmath::Matrix4::identity().into(),
+        }
+    }
+    fn update_view_proj(&mut self, camera: &Camera) {
+        self.view_proj = camera.build_view_projection_matrix().into();
     }
 }
 
