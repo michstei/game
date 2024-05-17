@@ -13,10 +13,16 @@ use winit::dpi::PhysicalPosition;
 // lib.rs
 use winit::window::Window;
 
+use model::Model;
+use model::Vertex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+use crate::model::DrawModel;
+
 mod texture;
+mod model;
+mod resources;
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
 pub async fn run() {
@@ -199,10 +205,7 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    num_vertices: u32,
-    index_buffer: wgpu::Buffer,
-    num_indices: u32,
+    obj_model: model::Model,
     diffuse_bind_group: wgpu::BindGroup,
     diffuse_texture: texture::Texture,
     camera: Camera,
@@ -221,8 +224,6 @@ struct State {
     cursor_pos: PhysicalPosition<f64>,
     keyboard_state: KeyboardState,
 
-    diffuse_bind_group_smile: wgpu::BindGroup,
-    diffuse_texture_smile: texture::Texture,
 }
 
 impl State {
@@ -275,9 +276,7 @@ impl State {
         };
         surface.configure(&device, &config);
         let diffuse_bytes = include_bytes!("..\\assets\\happy-tree.png");
-        let diffuse_bytes_smile = include_bytes!("..\\assets\\smile.jpg");
         let diffuse_texture = texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "tree").expect("Failed to create texture");
-        let diffuse_texture_smile = texture::Texture::from_bytes(&device, &queue, diffuse_bytes_smile, "smile").expect("Failed to create texture");
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -316,22 +315,7 @@ impl State {
                 label: Some("diffuse bind group"),
             }
         );
-        let diffuse_bind_group_smile = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&diffuse_texture_smile.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&diffuse_texture_smile.sampler),
-                    },
-                ],
-                label: Some("diffuse bind group smile"),
-            }
-        );
+
 
         let camera = Camera {
             eye: (0.0, 1.0, 2.0).into(),
@@ -400,7 +384,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc(), InstanceRaw::desc(), ],
+                buffers: &[model::ModelVertex::desc(), InstanceRaw::desc(), ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -434,33 +418,22 @@ impl State {
             },
             multiview: None,
         });
-        let vertex_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex buffer"),
-                contents: bytemuck::cast_slice(VERTICES),
-                usage: wgpu::BufferUsages::VERTEX,
-            }
-        );
-        let index_buffer = device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Index buffer"),
-                contents: bytemuck::cast_slice(INDICES),
-                usage: wgpu::BufferUsages::INDEX,
-            }
-        );
-        let num_indices = INDICES.len() as u32;
-        let num_vertices = VERTICES.len() as u32;
 
         const NUM_INSTANCES_PER_ROW: u32 = 10;
-        const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(NUM_INSTANCES_PER_ROW as f32 * 0.5, 0.0, NUM_INSTANCES_PER_ROW as f32 * 0.5);
+        const SPACE_BETWEEN: f32 = 3.0;
         let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
             (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                let position = cgmath::Vector3 { x: x as f32, y: 0.0, z: z as f32 } - INSTANCE_DISPLACEMENT;
+                let x = SPACE_BETWEEN * (x as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+                let z = SPACE_BETWEEN * (z as f32 - NUM_INSTANCES_PER_ROW as f32 / 2.0);
+
+                let position = cgmath::Vector3 { x, y: 0.0, z };
+
                 let rotation = if position.is_zero() {
                     cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0))
                 } else {
                     cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
                 };
+
                 Instance {
                     position,
                     rotation,
@@ -475,6 +448,7 @@ impl State {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }
         );
+        let obj_model = resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout).await.expect("failed to load model");
         Self {
             window,
             surface,
@@ -483,10 +457,7 @@ impl State {
             config,
             size,
             render_pipeline,
-            vertex_buffer,
-            num_vertices,
-            index_buffer,
-            num_indices,
+            obj_model,
             diffuse_bind_group,
             diffuse_texture,
             camera,
@@ -499,8 +470,6 @@ impl State {
             depth_texture,
             cursor_pos: PhysicalPosition::default(),
             keyboard_state: KeyboardState::new(),
-            diffuse_bind_group_smile,
-            diffuse_texture_smile,
         }
     }
 
@@ -594,45 +563,13 @@ impl State {
                 timestamp_writes: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, if self.keyboard_state.is_key_pressed(VirtualKeyCode::Space)
-            { &self.diffuse_bind_group_smile } else { &self.diffuse_bind_group }, &[]);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera_bind_group);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    tex_coords: [f32; 2],
-}
-
-impl Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-        }
     }
 }
 
@@ -711,19 +648,3 @@ impl InstanceRaw {
         }
     }
 }
-
-
-const VERTICES: &[Vertex] = &[
-    // Changed
-    Vertex { position: [-0.0868241, 0.49240386, 0.0], tex_coords: [0.4131759, 0.00759614] }, // A
-    Vertex { position: [-0.49513406, 0.06958647, 0.0], tex_coords: [0.0048659444, 0.43041354] }, // B
-    Vertex { position: [-0.21918549, -0.44939706, 0.0], tex_coords: [0.28081453, 0.949397] }, // C
-    Vertex { position: [0.35966998, -0.3473291, 0.0], tex_coords: [0.85967, 0.84732914] }, // D
-    Vertex { position: [0.44147372, 0.2347359, 0.0], tex_coords: [0.9414737, 0.2652641] }, // E
-];
-
-const INDICES: &[u16] = &[
-    0, 1, 4,
-    1, 2, 4,
-    2, 3, 4,
-];

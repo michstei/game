@@ -7,6 +7,12 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[build-dependencies]
+anyhow = "1.0"
+fs_extra = "1.2"
+glob = "0.3"
+
+
 [dependencies]
 cfg-if = "1"
 winit = "0.28"
@@ -18,7 +24,9 @@ bytemuck = { version = "1.12", features = ["derive"] }
 anyhow = "1.0.82"
 cgmath = "0.18.0"
 rand = "0.9.0-alpha.1"
-
+tobj = { version = "4.0.2", features = [
+    "async",
+] }
 
 [dependencies.image]
 version = "0.25.1"
@@ -36,4 +44,6 @@ web-sys = { version = "0.3", features = [
     "Document",
     "Window",
     "Element",
+    "Location",
 ] }
+reqwest = { version = "0.12.4" }
