@@ -13,12 +13,9 @@ use winit::dpi::PhysicalPosition;
 // lib.rs
 use winit::window::Window;
 
-use model::Model;
 use model::Vertex;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
-
-use crate::model::{DrawLight, DrawModel};
 
 mod texture;
 mod model;
@@ -206,8 +203,6 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     obj_model: model::Model,
-    diffuse_bind_group: wgpu::BindGroup,
-    diffuse_texture: texture::Texture,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -278,8 +273,6 @@ impl State {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        let diffuse_bytes = include_bytes!("..\\assets\\happy-tree.png");
-        let diffuse_texture = texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "tree").expect("Failed to create texture");
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -302,22 +295,6 @@ impl State {
                 ],
                 label: Some("texture binding group layout"),
             });
-        let diffuse_bind_group = device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                layout: &texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
-                    },
-                ],
-                label: Some("diffuse bind group"),
-            }
-        );
 
 
         let camera = Camera {
@@ -344,7 +321,7 @@ impl State {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -404,10 +381,6 @@ impl State {
             label: None,
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
 
         let depth_texture = texture::Texture::create_depth_texture(&device, &config, "depth_texure");
 
@@ -461,6 +434,7 @@ impl State {
                 } else {
                     cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
                 };
+                // let rotation = cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(180.0));
 
                 Instance {
                     position,
@@ -486,8 +460,6 @@ impl State {
             size,
             render_pipeline,
             obj_model,
-            diffuse_bind_group,
-            diffuse_texture,
             camera,
             camera_controller,
             camera_uniform,
@@ -540,16 +512,17 @@ impl State {
     }
 
     fn update(&mut self) {
-        let mut rng = rand::thread_rng();
-        self.instances = self.instances.iter().map(|val| {
-            Instance {
-                position: cgmath::Vector3::new(
-                    val.position.x + (rng.gen_range(-1.0..1.0) / 100.0),
-                    val.position.y + (rng.gen_range(-1.0..1.0) / 100.0),
-                    val.position.z + (rng.gen_range(-1.0..1.0) / 100.0)),
-                rotation: val.rotation,
-            }
-        }).collect::<Vec<_>>();
+        // let mut rng = rand::thread_rng();
+        // self.instances = self.instances.iter().map(|val| {
+        //     Instance {
+        //         position: cgmath::Vector3::new(
+        //             val.position.x + (rng.gen_range(-1.0..1.0) / 100.0),
+        //             val.position.y + (rng.gen_range(-1.0..1.0) / 100.0),
+        //             val.position.z + (rng.gen_range(-1.0..1.0) / 100.0)),
+        //         rotation: val.rotation,
+        //     }
+        // }).collect::<Vec<_>>();
+
         let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
         self.light_uniform.position =
             (cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(1.0)) * old_position).into();
@@ -608,6 +581,7 @@ impl State {
                 &self.light_bind_group,
             );
             render_pass.set_pipeline(&self.render_pipeline);
+            use crate::model::DrawModel;
             render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -620,17 +594,20 @@ impl State {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
+    view_position: [f32; 4],
     view_proj: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
     fn new() -> Self {
         Self {
+            view_position: [0.0; 4],
             view_proj: cgmath::Matrix4::identity().into(),
         }
     }
     fn update_view_proj(&mut self, camera: &Camera) {
-        self.view_proj = camera.build_view_projection_matrix().into();
+        self.view_position = camera.eye.to_homogeneous().into();
+        self.view_proj = (OPENGL_TO_WGPU_MATRIX * camera.build_view_projection_matrix()).into();
     }
 }
 
@@ -643,6 +620,7 @@ impl Instance {
     fn to_raw(&self) -> InstanceRaw {
         InstanceRaw {
             model: (cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation)).into(),
+            normal: cgmath::Matrix3::from(self.rotation).into(),
         }
     }
 }
@@ -651,6 +629,7 @@ impl Instance {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct InstanceRaw {
     model: [[f32; 4]; 4],
+    normal: [[f32; 3]; 3],
 }
 
 impl InstanceRaw {
@@ -686,6 +665,21 @@ impl InstanceRaw {
                     offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 19]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 22]>() as wgpu::BufferAddress,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Float32x3,
                 },
             ],
         }
