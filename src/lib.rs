@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use cgmath::InnerSpace;
 use cgmath::prelude::*;
-use rand::Rng;
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
@@ -222,6 +221,7 @@ struct State {
     cursor_pos: PhysicalPosition<f64>,
     keyboard_state: KeyboardState,
 
+    debug_material: model::Material,
 }
 
 impl State {
@@ -288,6 +288,22 @@ impl State {
                 },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
@@ -451,6 +467,17 @@ impl State {
             }
         );
         let obj_model = resources::load_model("cube.obj", &device, &queue, &texture_bind_group_layout).await.expect("failed to load model");
+
+        let debug_material = {
+            let diffuse_bytes = include_bytes!("../res/cobble-diffuse.png");
+            let normal_bytes = include_bytes!("../res/cobble-normal.png");
+
+            let diffuse_texture = texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "res/alt-diffuse.png", false).unwrap();
+            let normal_texture = texture::Texture::from_bytes(&device, &queue, normal_bytes, "res/alt-normal.png", true).unwrap();
+
+            model::Material::new(&device, "alt-material", diffuse_texture, normal_texture, &texture_bind_group_layout)
+        };
+
         Self {
             window,
             surface,
@@ -474,6 +501,8 @@ impl State {
             depth_texture,
             cursor_pos: PhysicalPosition::default(),
             keyboard_state: KeyboardState::new(),
+            #[allow(dead_code)]
+            debug_material,
         }
     }
 
@@ -512,17 +541,6 @@ impl State {
     }
 
     fn update(&mut self) {
-        // let mut rng = rand::thread_rng();
-        // self.instances = self.instances.iter().map(|val| {
-        //     Instance {
-        //         position: cgmath::Vector3::new(
-        //             val.position.x + (rng.gen_range(-1.0..1.0) / 100.0),
-        //             val.position.y + (rng.gen_range(-1.0..1.0) / 100.0),
-        //             val.position.z + (rng.gen_range(-1.0..1.0) / 100.0)),
-        //         rotation: val.rotation,
-        //     }
-        // }).collect::<Vec<_>>();
-
         let old_position: cgmath::Vector3<_> = self.light_uniform.position.into();
         self.light_uniform.position =
             (cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(1.0)) * old_position).into();
@@ -582,7 +600,14 @@ impl State {
             );
             render_pass.set_pipeline(&self.render_pipeline);
             use crate::model::DrawModel;
-            render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
+            render_pass.draw_model_instanced_with_material(
+                &self.obj_model,
+                &self.debug_material,
+                0..self.instances.len() as u32,
+                &self.camera_bind_group,
+                &self.light_bind_group,
+            );
+            // render_pass.draw_model_instanced(&self.obj_model, 0..self.instances.len() as u32, &self.camera_bind_group, &self.light_bind_group);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
